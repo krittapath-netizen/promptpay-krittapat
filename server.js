@@ -2,151 +2,56 @@ const express = require("express");
 
 const app = express();
 
+const PORT = process.env.PORT || 3000;
+
+// รับ JSON จาก Omise
 app.use(express.json());
 
 // ================================
-// เก็บยอดเงินล่าสุด
-// ================================
-
-let lastPayment = {
-  paid: false,
-  amount: 0,
-  transactionId: "",
-  time: ""
-};
-
-
-// ================================
-// หน้าแรก
+// หน้าเช็ก Server
 // ================================
 
 app.get("/", (req, res) => {
-
   res.send("PromptPay Server is running");
-
 });
 
-
 // ================================
-// ตรวจสอบสถานะการจ่ายเงิน
-// ESP32 จะเรียก URL นี้
-// ================================
-
-app.get("/payment-status", (req, res) => {
-
-  res.json(lastPayment);
-
-});
-
-
-// ================================
-// รับ Webhook จาก Omise
+// Webhook จาก Omise
 // ================================
 
 app.post("/webhook", (req, res) => {
 
-  console.log("================================");
+  console.log("");
+  console.log("==============================");
   console.log("OMISE WEBHOOK RECEIVED");
-  console.log("================================");
+  console.log("==============================");
 
   console.log(JSON.stringify(req.body, null, 2));
 
+  // ตอบ Omise ก่อน
+  res.status(200).send("OK");
 
   const event = req.body;
 
+  // แสดงประเภท Event
+  console.log("Event:", event.key);
 
-  // ตรวจ event ที่เกี่ยวกับ charge
-  if (
-    event &&
-    event.data &&
-    event.data.object
-  ) {
+  // ถ้ามีข้อมูล charge
+  if (event.data) {
 
-    const charge = event.data.object;
-
-
-    // ถ้าการชำระเงินสำเร็จ
-    if (
-      charge.status === "successful"
-    ) {
-
-      let amountBaht =
-        Number(charge.amount) / 100;
-
-
-      lastPayment = {
-
-        paid: true,
-
-        amount: amountBaht,
-
-        transactionId:
-          charge.id || "",
-
-        time:
-          new Date().toISOString()
-
-      };
-
-
-      console.log(
-        "PAYMENT SUCCESS!"
-      );
-
-      console.log(
-        "Amount:",
-        amountBaht
-      );
-
-    }
+    console.log("Data ID:", event.data.id);
+    console.log("Amount:", event.data.amount);
+    console.log("Currency:", event.data.currency);
+    console.log("Status:", event.data.status);
 
   }
 
-
-  // ต้องตอบกลับ Omise
-  res.status(200).send("OK");
-
 });
-
-
-// ================================
-// Reset สถานะการจ่ายเงิน
-// ================================
-
-app.post("/reset-payment", (req, res) => {
-
-  lastPayment = {
-
-    paid: false,
-
-    amount: 0,
-
-    transactionId: "",
-
-    time: ""
-
-  };
-
-
-  res.json({
-    success: true
-  });
-
-});
-
-
-// ================================
-// PORT
-// ================================
-
-const PORT =
-  process.env.PORT || 3000;
-
 
 app.listen(PORT, () => {
 
   console.log(
-    `Server running on port ${PORT}`
+    `PromptPay Server running on port ${PORT}`
   );
 
 });

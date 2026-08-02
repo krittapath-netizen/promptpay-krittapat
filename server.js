@@ -1,22 +1,16 @@
 const express = require("express");
+const crypto = require("crypto");
 
 const app = express();
 
 const PORT = process.env.PORT || 3000;
 
-const OMISE_SECRET_KEY =
-  process.env.OMISE_SECRET_KEY;
+const OMISE_WEBHOOK_SECRET =
+  process.env.OMISE_WEBHOOK_SECRET;
 
 
 // =====================================================
-// JSON
-// =====================================================
-
-app.use(express.json());
-
-
-// =====================================================
-// สถานะการจ่าย
+// สถานะ Payment
 // =====================================================
 
 let currentPayment = {
@@ -27,9 +21,27 @@ let currentPayment = {
 
   status: "idle",
 
-  paid: false
+  paid: false,
+
+  used: false
 
 };
+
+
+// =====================================================
+// เก็บ RAW BODY สำหรับตรวจ Signature
+// =====================================================
+
+app.use(
+  express.json({
+    verify: (req, res, buf) => {
+
+      req.rawBody =
+        Buffer.from(buf);
+
+    }
+  })
+);
 
 
 // =====================================================
@@ -38,7 +50,7 @@ let currentPayment = {
 
 app.get("/", (req, res) => {
 
-  res.send(
+  res.status(200).send(
     "PromptPay Server is running"
   );
 
@@ -47,6 +59,9 @@ app.get("/", (req, res) => {
 
 // =====================================================
 // สร้าง Payment
+// ESP32 เรียก:
+//
+// /create-payment?amount=20
 // =====================================================
 
 app.get(
@@ -63,20 +78,22 @@ app.get(
 
       if (
         !Number.isInteger(amount) ||
-        amount <= 0
+        amount < 20
       ) {
 
         return res.status(400).json({
 
           error:
-            "Invalid amount"
+            "Minimum amount is 20 THB"
 
         });
 
       }
 
 
-      // ตรวจ Secret Key
+      const OMISE_SECRET_KEY =
+        process.env.OMISE_SECRET_KEY;
+
 
       if (!OMISE_SECRET_KEY) {
 
@@ -99,7 +116,7 @@ app.get(
 
 
       // =================================================
-      // สร้าง Omise Charge
+      // สร้าง PromptPay Charge
       // =================================================
 
       const params =
@@ -196,7 +213,7 @@ app.get(
 
 
       // =================================================
-      // จำรายการ
+      // เก็บรายการปัจจุบัน
       // =================================================
 
       currentPayment = {
@@ -211,6 +228,9 @@ app.get(
           data.status,
 
         paid:
+          false,
+
+        used:
           false
 
       };
@@ -219,7 +239,6 @@ app.get(
       console.log(
         "NEW PAYMENT"
       );
-
 
       console.log(
         JSON.stringify(
@@ -231,7 +250,7 @@ app.get(
 
 
       // =================================================
-      // ส่งข้อมูลให้ ESP32
+      // ส่งข้อมูลกลับ
       // =================================================
 
       res.json({
@@ -275,35 +294,6 @@ app.get(
 
 
 // =====================================================
-// ตรวจสถานะ
-// =====================================================
-
-app.get(
-  "/payment-status",
-  (req, res) => {
-
-    res.json({
-
-      charge_id:
-        currentPayment.chargeId,
-
-      amount:
-        currentPayment.amount,
-
-      status:
-        currentPayment.status,
-
-      paid:
-        currentPayment.paid
-
-    });
-
-  }
-
-);
-
-
-// =====================================================
 // WEBHOOK
 // =====================================================
 
@@ -311,25 +301,185 @@ app.post(
   "/webhook",
   (req, res) => {
 
+    console.log("");
     console.log(
-      "================================"
+      "=============================="
     );
 
     console.log(
-      "WEBHOOK RECEIVED"
+      "OMISE WEBHOOK RECEIVED"
     );
 
     console.log(
-      JSON.stringify(
-        req.body,
-        null,
-        2
-      )
+      "=============================="
     );
 
+
+    // =================================================
+    // ตรวจ Webhook Secret
+    // =================================================
+
+    if (!OMISE_WEBHOOK_SECRET) {
+
+      console.log(
+        "Webhook secret missing"
+      );
+
+      return res
+        .status(500)
+        .send("Webhook secret missing");
+
+    }
+
+
+    const signature =
+      req.headers[
+        "omise-signature"
+      ];
+
+
+    const timestamp =
+      req.headers[
+        "omise-signature-timestamp"
+      ];
+
+
+    if (
+      !signature ||
+      !timestamp ||
+      !req.rawBody
+    ) {
+
+      console.log(
+        "Missing signature"
+      );
+
+      return res
+        .status(401)
+        .send("Invalid signature");
+
+    }
+
+
+    // =================================================
+    // สร้าง Signature ที่เราคาดหวัง
+    // =================================================
+
+    const signedPayload =
+      `${timestamp}.${req.rawBody.toString("utf8")}`;
+
+
+    const expected =
+      crypto
+        .createHmac(
+          "sha256",
+          OMISE_WEBHOOK_SECRET
+        )
+        .update(
+          signedPayload
+        )
+        .digest("hex");
+
+
+    const incoming =
+      signature.split(",");
+
+
+    let valid =
+      false;
+
+
+    for (
+      const item of incoming
+    ) {
+
+      const sig =
+        item.trim();
+
+
+      if (
+        sig.length !==
+        expected.length
+      ) {
+
+        continue;
+
+      }
+
+
+      if (
+        crypto.timingSafeEqual(
+
+          Buffer.from(
+            sig,
+            "utf8"
+          ),
+
+          Buffer.from(
+            expected,
+            "utf8"
+          )
+
+        )
+      ) {
+
+        valid =
+          true;
+
+        break;
+
+      }
+
+    }
+
+
+    if (!valid) {
+
+      console.log(
+        "INVALID WEBHOOK SIGNATURE"
+      );
+
+      return res
+        .status(401)
+        .send(
+          "Invalid signature"
+        );
+
+    }
+
+
+    // =================================================
+    // อ่าน Event
+    // =================================================
 
     const event =
       req.body;
+
+
+    console.log(
+      "Event:",
+      event.key
+    );
+
+
+    // =================================================
+    // charge.create
+    // =================================================
+
+    if (
+      event.key ===
+      "charge.create"
+    ) {
+
+      console.log(
+        "Charge created - NOT PAID"
+      );
+
+      return res
+        .status(200)
+        .send("OK");
+
+    }
 
 
     // =================================================
@@ -354,68 +504,147 @@ app.post(
       }
 
 
-      const amount =
-        Number(
-          charge.amount
-        ) / 100;
-
-
-      const status =
-        charge.status;
-
-
       console.log(
-        "CHARGE:",
+        "Charge ID:",
         charge.id
       );
 
 
       console.log(
-        "AMOUNT:",
-        amount
+        "Amount:",
+        charge.amount
       );
 
 
       console.log(
-        "STATUS:",
-        status
+        "Status:",
+        charge.status
       );
 
 
       // =================================================
-      // ตรวจรายการ
+      // ตรวจ Charge ID
       // =================================================
 
       if (
-
-        charge.id ===
+        charge.id !==
         currentPayment.chargeId
-
-        &&
-
-        amount ===
-        currentPayment.amount
-
-        &&
-
-        status ===
-        "successful"
-
       ) {
 
-        currentPayment.status =
-          "successful";
-
-
-        currentPayment.paid =
-          true;
-
-
         console.log(
-          "PAYMENT SUCCESS!"
+          "Charge ID does not match"
         );
 
+        return res
+          .status(200)
+          .send("OK");
+
       }
+
+
+      // =================================================
+      // ตรวจจำนวนเงิน
+      // =================================================
+
+      const receivedAmount =
+        Number(
+          charge.amount
+        ) / 100;
+
+
+      if (
+        receivedAmount !==
+        currentPayment.amount
+      ) {
+
+        console.log(
+          "Amount does not match"
+        );
+
+        return res
+          .status(200)
+          .send("OK");
+
+      }
+
+
+      // =================================================
+      // ตรวจสถานะ
+      // =================================================
+
+      if (
+        charge.status !==
+        "successful"
+      ) {
+
+        console.log(
+          "Payment not successful"
+        );
+
+        return res
+          .status(200)
+          .send("OK");
+
+      }
+
+
+      // =================================================
+      // ป้องกันจ่ายซ้ำ
+      // =================================================
+
+      if (
+        currentPayment.paid
+      ) {
+
+        console.log(
+          "Already marked as paid"
+        );
+
+        return res
+          .status(200)
+          .send("OK");
+
+      }
+
+
+      // =================================================
+      // PAYMENT SUCCESS
+      // =================================================
+
+      currentPayment.status =
+        "successful";
+
+
+      currentPayment.paid =
+        true;
+
+
+      currentPayment.used =
+        false;
+
+
+      console.log("");
+      console.log(
+        "******************************"
+      );
+
+      console.log(
+        "PAYMENT SUCCESS!"
+      );
+
+      console.log(
+        "Amount:",
+        currentPayment.amount
+      );
+
+      console.log(
+        "Charge:",
+        currentPayment.chargeId
+      );
+
+      console.log(
+        "******************************"
+      );
 
     }
 
@@ -423,6 +652,109 @@ app.post(
     res
       .status(200)
       .send("OK");
+
+  }
+
+);
+
+
+// =====================================================
+// ESP32 ตรวจสถานะ
+// =====================================================
+
+app.get(
+  "/payment-status",
+  (req, res) => {
+
+    res.json({
+
+      charge_id:
+        currentPayment.chargeId,
+
+      amount:
+        currentPayment.amount,
+
+      status:
+        currentPayment.status,
+
+      paid:
+        currentPayment.paid,
+
+      used:
+        currentPayment.used
+
+    });
+
+  }
+
+);
+
+
+// =====================================================
+// ESP32 ยืนยันว่าใช้เงินแล้ว
+// =====================================================
+
+app.post(
+  "/payment-used",
+  (req, res) => {
+
+    if (
+      !currentPayment.paid
+    ) {
+
+      return res.status(400).json({
+
+        success:
+          false,
+
+        error:
+          "Payment not completed"
+
+      });
+
+    }
+
+
+    if (
+      currentPayment.used
+    ) {
+
+      return res.status(400).json({
+
+        success:
+          false,
+
+        error:
+          "Payment already used"
+
+      });
+
+    }
+
+
+    currentPayment.used =
+      true;
+
+
+    currentPayment.paid =
+      false;
+
+
+    currentPayment.status =
+      "used";
+
+
+    console.log(
+      "PAYMENT MARKED AS USED"
+    );
+
+
+    res.json({
+
+      success:
+        true
+
+    });
 
   }
 
@@ -442,7 +774,7 @@ app.listen(
   () => {
 
     console.log(
-      `Server running on ${PORT}`
+      `PromptPay Server running on port ${PORT}`
     );
 
   }
